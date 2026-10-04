@@ -248,7 +248,7 @@ async function detectFaces(src, W, H, onProg) {
   const levels = [1, 2, 3, 4].filter(n => n === 1 || Math.min(W, H) / n >= 200);
   const total = levels.reduce((s, n) => s + n * n, 0); let done = 0;
   for (const n of levels) for (const box of tileGrid(W, H, n)) {
-    detectRegion(src, box, W, H, found, n <= 2 ? [0, 45, 90, 135, 180, 225, 270, 315] : [0]);
+    detectRegion(src, box, W, H, found, n <= 2 ? [0, 90, 180, 270] : [0]);
     onProg(++done / total * 0.5);
     await new Promise(r => setTimeout(r));   // UIを固めない
   }
