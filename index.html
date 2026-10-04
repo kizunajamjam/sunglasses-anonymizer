@@ -20,11 +20,6 @@
   .warn { color:var(--warn); font-weight:600; }
   #status { color:var(--mut); font-size:.9rem; min-height:1.4em; }
   #summary { font-weight:600; }
-  .edit { display:flex; flex-direction:column; gap:8px; margin:8px 0; }
-  .edit[hidden] { display:none; }
-  .hint { color:var(--mut); font-size:.85rem; }
-  .edit label { display:flex; gap:8px; align-items:center; }
-  .edit input[type=range] { flex:1; }
 </style>
 </head>
 <body>
@@ -255,34 +250,17 @@ function drawGlasses(ctx, f, style, scale) {
   ctx.restore();
 }
 
-// ---------- 手動補正つきUI ----------
-const needsReview = f => !f.hidden && !f.reviewed && f.reasons.length > 0;
-const center = f => f.bar ? [f.bar.cx, f.bar.cy] : [(f.rEye[0]+f.lEye[0])/2, (f.rEye[1]+f.lEye[1])/2];
-const adjOf = f => (f.adj ||= { dx: 0, dy: 0, s: 1, rot: 0 });
-const radiusOf = (f, r) => {
-  const base = f.bar ? f.bar.len * 0.6 : Math.hypot(f.lEye[0]-f.rEye[0], f.lEye[1]-f.rEye[1]) * 1.1;
-  return Math.max(base * adjOf(f).s, 0.02 * Math.max(r.W, r.H));
-};
+// ---------- UI ----------
+const needsReview = f => f.reasons.length > 0;
 
 function drawFace(ctx, f, style, scale) {
-  if (f.hidden) return;
-  const a = adjOf(f), [cx, cy] = center(f);
-  ctx.save();
-  ctx.translate(cx + a.dx, cy + a.dy); ctx.rotate(a.rot * Math.PI / 180); ctx.scale(a.s, a.s); ctx.translate(-cx, -cy);
   drawGlasses(ctx, f, style, scale);
-  ctx.restore();
 }
 
 function makeCard(name) {
   const el = document.createElement("div"); el.className = "card";
   el.innerHTML = `<div><b></b></div><div class="info">待機中</div><canvas></canvas>
-    <div class="edit" hidden>
-      <div class="hint">サングラスをタップして選び、ドラッグで移動。「追加」のあと写真をタップすると新しく置けます。</div>
-      <label>大きさ <input class="es" type="range" min="0.4" max="3" step="0.05" value="1" disabled></label>
-      <label>回転 <input class="er" type="range" min="-90" max="90" step="1" value="0" disabled></label>
-      <div class="row"><button class="sec add">追加</button><button class="sec del" disabled>削除</button></div>
-    </div>
-    <div class="row"><button class="sec save" disabled>保存</button><button class="sec tog" disabled>編集</button></div>`;
+    <div class="row"><button class="sec save" disabled>保存</button></div>`;
   el.querySelector("b").textContent = name;
   $("list").appendChild(el);
   return el;
@@ -303,72 +281,18 @@ function renderPreview(r) {
   for (const f of faces) if (needsReview(f)) {
     pc.strokeStyle = "#f97316"; const [a, b, c, d] = f.bbox; pc.strokeRect(a*k, b*k, (c-a)*k, (d-b)*k);
   }
-  if (r.editing && r.sel && !r.sel.hidden) {
-    const [cx, cy] = center(r.sel), a = adjOf(r.sel);
-    pc.strokeStyle = "#2563eb"; pc.setLineDash([8, 6]); pc.beginPath();
-    pc.arc((cx + a.dx) * k, (cy + a.dy) * k, radiusOf(r.sel, r) * k, 0, Math.PI * 2); pc.stroke(); pc.setLineDash([]);
-  }
 }
 
 function updateInfo(r) {
-  const vis = r.faces.filter(f => !f.hidden), rv = vis.filter(needsReview);
+  const vis = r.faces, rv = vis.filter(needsReview);
   r.card.querySelector(".info").innerHTML =
     `検出 ${vis.length}人 / <span class="${rv.length||!vis.length?'warn':''}">要確認 ${rv.length}人${vis.length ? "" : "（顔0件：要確認）"}</span>`
     + (rv.length ? `<br><span class="warn">${rv.map(f=>f.reasons.join("/")).join("、")}</span>（オレンジ枠）` : "");
   summarize();
 }
 
-function syncControls(r) {
-  const c = r.card, f = r.sel, on = !!f && !f.hidden;
-  c.querySelector(".es").disabled = c.querySelector(".er").disabled = c.querySelector(".del").disabled = !on;
-  if (on) { c.querySelector(".es").value = adjOf(f).s; c.querySelector(".er").value = adjOf(f).rot; }
-}
-
-function setupEditor(r) {
-  const c = r.card, pv = c.querySelector("canvas"), edit = c.querySelector(".edit");
-  let drag = null, adding = false;
-  const toImg = e => { const b = pv.getBoundingClientRect(); return [(e.clientX - b.left) / b.width * r.W, (e.clientY - b.top) / b.height * r.H]; };
-  const touched = f => { f.reviewed = true; updateInfo(r); };
-  c.querySelector(".tog").onclick = () => {
-    r.editing = !r.editing; edit.hidden = !r.editing; pv.style.touchAction = r.editing ? "none" : "";
-    c.querySelector(".tog").textContent = r.editing ? "編集を終える" : "編集"; if (!r.editing) r.sel = null;
-    syncControls(r); renderPreview(r);
-  };
-  c.querySelector(".add").onclick = () => { adding = true; c.querySelector(".add").textContent = "写真をタップ…"; };
-  c.querySelector(".del").onclick = () => { if (r.sel) { r.sel.hidden = true; r.sel = null; updateInfo(r); syncControls(r); renderPreview(r); } };
-  c.querySelector(".es").oninput = e => { if (r.sel) { adjOf(r.sel).s = +e.target.value; touched(r.sel); renderPreview(r); } };
-  c.querySelector(".er").oninput = e => { if (r.sel) { adjOf(r.sel).rot = +e.target.value; touched(r.sel); renderPreview(r); } };
-  pv.addEventListener("pointerdown", e => {
-    if (!r.editing) return;
-    const [x, y] = toImg(e);
-    if (adding) {
-      adding = false; c.querySelector(".add").textContent = "追加";
-      const ref = r.faces.find(f => !f.hidden), len = ref ? radiusOf(ref, r) * 1.6 : 0.08 * Math.max(r.W, r.H);
-      const f = { rEye:[x,y], lEye:[x,y], rOuter:[x,y], rInner:[x,y], lOuter:[x,y], lInner:[x,y], vSpan: len * 0.2,
-        bbox:[x-len, y-len, x+len, y+len], yaw:0, truncated:false, reasons:[], reviewed:true,
-        bar:{ cx:x, cy:y, len, hgt: len * 0.5, ang:0 } };
-      r.faces.push(f); r.sel = f; updateInfo(r); syncControls(r); renderPreview(r); return;
-    }
-    let best = null, bd = Infinity;
-    for (const f of r.faces) if (!f.hidden) {
-      const [cx, cy] = center(f), a = adjOf(f), d = Math.hypot(x - cx - a.dx, y - cy - a.dy);
-      if (d < radiusOf(f, r) && d < bd) { best = f; bd = d; }
-    }
-    r.sel = best; syncControls(r);
-    if (best) { drag = { x, y }; pv.setPointerCapture(e.pointerId); }
-    renderPreview(r);
-  });
-  pv.addEventListener("pointermove", e => {
-    if (!drag || !r.sel) return;
-    const [x, y] = toImg(e), a = adjOf(r.sel);
-    a.dx += x - drag.x; a.dy += y - drag.y; drag = { x, y }; renderPreview(r);
-  });
-  const end = () => { if (drag && r.sel) touched(r.sel); drag = null; };
-  pv.addEventListener("pointerup", end); pv.addEventListener("pointercancel", end);
-}
-
 function summarize() {
-  const vis = r => r.faces.filter(f => !f.hidden);
+  const vis = r => r.faces;
   const n = results.reduce((s, r) => s + vis(r).length, 0);
   const rv = results.reduce((s, r) => s + r.faces.filter(needsReview).length, 0);
   const zero = results.filter(r => !vis(r).length).length;
@@ -410,9 +334,9 @@ $("run").onclick = async () => {
       if (Math.max(W, H) > MAX_SIDE) throw new Error("画像が大きすぎます");
       $("status").textContent = `処理中 ${i + 1}/${files.length}`;
       const faces = await detectFaces(img, W, H, p => info.textContent = `検出中 ${Math.round(p * 100)}%`);
-      const r = { name: file.name, png: /png$/i.test(file.type), img, faces, W, H, card, editing: false, sel: null };
-      results.push(r); setupEditor(r); renderPreview(r); updateInfo(r);
-      for (const b of card.querySelectorAll(".save, .tog")) b.disabled = false;
+      const r = { name: file.name, png: /png$/i.test(file.type), img, faces, W, H, card };
+      results.push(r); renderPreview(r); updateInfo(r);
+      card.querySelector(".save").disabled = false;
       card.querySelector(".save").onclick = () => save(r);
     } catch (e) { info.textContent = "失敗: " + e.message; info.className = "info warn"; }
   }
