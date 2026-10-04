@@ -42,17 +42,17 @@
 <div id="list"></div>
 
 <script type="module">
-import { FaceLandmarker, PoseLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21";
+import { FaceLandmarker, PoseLandmarker, FaceDetector, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1";
 
 const $ = id => document.getElementById(id);
 const R_OUTER=33, R_INNER=133, R_TOP=159, R_BOTTOM=145, L_INNER=362, L_OUTER=263, L_TOP=386, L_BOTTOM=374, NOSE=1;
 const MIN_EYE_DIST=14, MAX_YAW=0.45, MAX_ROLL=60;
 const MAX_SIDE = 12000;
 
-let landmarker = null, poseLandmarker = null, files = [], results = [];
+let landmarker = null, poseLandmarker = null, blaze = null, files = [], results = [];
 
 async function init() {
-  const fileset = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/wasm");
+  const fileset = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm");
   const opts = n => ({
     baseOptions: { modelAssetPath: "models/face_landmarker.task", delegate: n },
     runningMode: "IMAGE", numFaces: 60,
@@ -66,6 +66,12 @@ async function init() {
       runningMode: "IMAGE", numPoses: 30, minPoseDetectionConfidence: 0.3, minPosePresenceConfidence: 0.3,
     });
   } catch (e) { console.warn("pose unavailable", e); }
+  try {
+    blaze = await FaceDetector.createFromOptions(fileset, {
+      baseOptions: { modelAssetPath: "models/blaze_face_full_range.tflite", delegate: "CPU" },
+      runningMode: "IMAGE", minDetectionConfidence: 0.4,
+    });
+  } catch (e) { console.warn("blaze unavailable", e); }
   $("status").textContent = "準備OK。写真を選んでください。";
   updateButtons();
 }
@@ -154,6 +160,54 @@ function detectRegion(src, box, W, H, out, rots) {
   }
 }
 
+// ---------- 遠距離用 BlazeFace: 小さい顔の補完（必ず要確認） ----------
+const BLAZE_MIN_SCORE = 0.6;
+function faceFromEyes(rEye, lEye, bbox) {
+  const d = Math.hypot(lEye[0]-rEye[0], lEye[1]-rEye[1]), bw = bbox[2] - bbox[0];
+  let f;
+  if (d < 0.25 * bw) {            // 目が寄っている = 横顔寄り → 太いバー
+    const c = [(rEye[0]+lEye[0])/2, (rEye[1]+lEye[1])/2];
+    f = { rEye:c, lEye:c, rOuter:c, rInner:c, lOuter:c, lInner:c, vSpan: bw * 0.08, bbox, yaw: 0.9, truncated:false,
+      bar: { cx:c[0], cy:c[1], len: bw * 0.6, hgt: bw * 0.28, ang: 0 }, reasons: [] };
+  } else {
+    const ex = [(lEye[0]-rEye[0])/d, (lEye[1]-rEye[1])/d], q = d * 0.15;
+    f = { rEye, lEye, rOuter:[rEye[0]-ex[0]*q, rEye[1]-ex[1]*q], rInner:[rEye[0]+ex[0]*q, rEye[1]+ex[1]*q],
+      lOuter:[lEye[0]+ex[0]*q, lEye[1]+ex[1]*q], lInner:[lEye[0]-ex[0]*q, lEye[1]-ex[1]*q],
+      vSpan: d * 0.3, bbox, yaw: 0, truncated:false, reasons: [] };
+  }
+  f.reasons.push("簡易検出");
+  return f;
+}
+async function mergeBlaze(src, W, H, faces, onProg) {
+  if (!blaze) return faces;
+  try { return await mergeBlazeInner(src, W, H, faces, onProg); }
+  catch (e) { console.warn("blaze failed; skipping", e); blaze = null; return faces; }   // 補助検出が使えなくても処理は続ける
+}
+async function mergeBlazeInner(src, W, H, faces, onProg) {
+  const out = faces.slice();
+  const levels = [1, 2, 3, 4, 6, 8, 10].filter(n => n === 1 || Math.min(W, H) / n >= 240);
+  const total = levels.reduce((s, n) => s + n * n, 0); let done = 0;
+  for (const n of levels) for (const [x0, y0, x1, y1] of tileGrid(W, H, n)) {
+    const w = x1 - x0, h = y1 - y0, c = document.createElement("canvas");
+    c.width = w; c.height = h; c.getContext("2d").drawImage(src, x0, y0, w, h, 0, 0, w, h);
+    for (const d of blaze.detect(c).detections) {
+      if (d.categories[0].score < BLAZE_MIN_SCORE) continue;   // 背景の物体などの誤検出が多い低スコアは捨てる
+      const bb = d.boundingBox, box = [bb.originX + x0, bb.originY + y0, bb.originX + bb.width + x0, bb.originY + bb.height + y0];
+      const kp = d.keypoints, rEye = [kp[0].x * w + x0, kp[0].y * h + y0], lEye = [kp[1].x * w + x0, kp[1].y * h + y0];
+      const f = faceFromEyes(rEye, lEye, box), mid = [(rEye[0]+lEye[0])/2, (rEye[1]+lEye[1])/2];
+      const dup = out.some(k => {
+        if (sameFace(f, k)) return true;
+        const [a, b, c2, e] = k.bbox, m = 0.2 * Math.max(c2 - a, e - b);
+        return mid[0] >= a - m && mid[0] <= c2 + m && mid[1] >= b - m && mid[1] <= e + m && iou(f.bbox, k.bbox) > 0.1;
+      });
+      if (!dup) out.push(f);
+    }
+    onProg(++done / total);
+    if (done % 8 === 0) await new Promise(r => setTimeout(r));
+  }
+  return out;
+}
+
 // ---------- 横顔: 姿勢推定で頭の位置を取り、目の位置に太いバーを置く ----------
 const PROFILE_RATIO = 3.0;
 function poseHeads(src, W, H) {
@@ -199,14 +253,15 @@ async function detectFaces(src, W, H, onProg) {
   const total = levels.reduce((s, n) => s + n * n, 0); let done = 0;
   for (const n of levels) for (const box of tileGrid(W, H, n)) {
     detectRegion(src, box, W, H, found, n <= 2 ? [0, 90, 180, 270] : [0]);
-    onProg(++done / total);
+    onProg(++done / total * 0.5);
     await new Promise(r => setTimeout(r));   // UIを固めない
   }
   found.sort((a, b) => (a.truncated - b.truncated) || ((a.reasons.length > 0) - (b.reasons.length > 0)) || ((a.rot !== 0) - (b.rot !== 0)) ||
     ((b.bbox[2]-b.bbox[0])*(b.bbox[3]-b.bbox[1]) - (a.bbox[2]-a.bbox[0])*(a.bbox[3]-a.bbox[1])));
   const kept = [];
   for (const f of found) if (!kept.some(k => sameFace(f, k))) kept.push(f);
-  const merged = mergePose(src, W, H, kept);
+  const withBlaze = await mergeBlaze(src, W, H, kept, p => onProg(0.5 + p * 0.5));
+  const merged = mergePose(src, W, H, withBlaze);
   merged.sort((a, b) => a.bbox[1] - b.bbox[1] || a.bbox[0] - b.bbox[0]);
   return merged;
 }
