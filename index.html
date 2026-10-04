@@ -79,6 +79,11 @@ function faceFromPoints(P) {
   const f = { rEye, lEye, rOuter:P[R_OUTER], rInner:P[R_INNER], lOuter:P[L_OUTER], lInner:P[L_INNER], vSpan, bbox, yaw, reasons:[], truncated:false };
   const d = dist(lEye, rEye);
   const roll = Math.abs(Math.atan2(lEye[1]-rEye[1], lEye[0]-rEye[0]) * 180 / Math.PI);
+  // 目・口の位置関係が顔として自然か（回転検出の誤検出対策）
+  const m = [(rEye[0]+lEye[0])/2, (rEye[1]+lEye[1])/2], v = [P[13][0]-m[0], P[13][1]-m[1]];
+  const vl = Math.hypot(v[0], v[1]), cross = (lEye[0]-rEye[0])*v[1] - (lEye[1]-rEye[1])*v[0];
+  const cosA = ((lEye[0]-rEye[0])*v[0] + (lEye[1]-rEye[1])*v[1]) / Math.max(d * vl, 1e-6);
+  if (cross <= 0 || vl / Math.max(d, 1e-6) < 0.6 || vl / Math.max(d, 1e-6) > 3.5 || Math.abs(cosA) > 0.6) f.reasons.push("目の位置が不確実");
   if (d < MIN_EYE_DIST) f.reasons.push("小さい顔");
   if (Math.abs(yaw) > MAX_YAW) f.reasons.push("横向き");
   if (roll > MAX_ROLL && roll < 180 - MAX_ROLL) f.reasons.push("大きく傾いている");
@@ -134,7 +139,7 @@ function detectRegion(src, box, W, H, out, rots) {
     const res = landmarker.detect(c);
     for (const lm of res.faceLandmarks) {
       const P = lm.map(p => { const q = toOriginal(rot, p.x * rw, p.y * rh, w, h); return [q[0] + x0, q[1] + y0]; });
-      const f = faceFromPoints(P);
+      const f = faceFromPoints(P); f.rot = rot;
       const [a, b, c2, d] = f.bbox;
       f.truncated = (x0 > 0 && a < x0 + mx) || (y0 > 0 && b < y0 + my) || (x1 < W && c2 > x1 - mx) || (y1 < H && d > y1 - my);
       out.push(f);
@@ -151,7 +156,7 @@ async function detectFaces(src, W, H, onProg) {
     onProg(++done / total);
     await new Promise(r => setTimeout(r));   // UIを固めない
   }
-  found.sort((a, b) => (a.truncated - b.truncated) ||
+  found.sort((a, b) => (a.truncated - b.truncated) || ((a.reasons.length > 0) - (b.reasons.length > 0)) || ((a.rot !== 0) - (b.rot !== 0)) ||
     ((b.bbox[2]-b.bbox[0])*(b.bbox[3]-b.bbox[1]) - (a.bbox[2]-a.bbox[0])*(a.bbox[3]-a.bbox[1])));
   const kept = [];
   for (const f of found) if (!kept.some(k => sameFace(f, k))) kept.push(f);
