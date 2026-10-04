@@ -67,8 +67,7 @@ async function init() {
 function updateButtons() { $("run").disabled = !landmarker || !files.length; }
 
 // ---------- 検出 ----------
-function faceFromLandmarks(lm, ox, oy, w, h) {
-  const P = lm.map(p => [p.x * w + ox, p.y * h + oy]);
+function faceFromPoints(P) {
   const mean = ids => [ids.reduce((s,i)=>s+P[i][0],0)/ids.length, ids.reduce((s,i)=>s+P[i][1],0)/ids.length];
   const dist = (a,b) => Math.hypot(a[0]-b[0], a[1]-b[1]);
   const rEye = mean([R_OUTER,R_INNER,R_TOP,R_BOTTOM]), lEye = mean([L_INNER,L_OUTER,L_TOP,L_BOTTOM]);
@@ -109,19 +108,37 @@ function* tileGrid(w, h, n, overlap = 0.25) {
   }
 }
 
-function detectRegion(src, box, W, H, out) {
+// 回転0/90/180/270度で検出し、座標を元の向きに戻す（寝ている人・横倒しの顔対策）
+function toOriginal(rot, rx, ry, w, h) {
+  if (rot === 0) return [rx, ry];
+  if (rot === 90) return [ry, h - rx];
+  if (rot === 180) return [w - rx, h - ry];
+  return [w - ry, rx];   // 270
+}
+
+function detectRegion(src, box, W, H, out, rots) {
   const [x0, y0, x1, y1] = box, w = x1 - x0, h = y1 - y0;
   const s = Math.max(w, h) < 640 ? 640 / Math.max(w, h) : 1;   // 検出用コピーだけ拡大（元画像は不変）
-  const c = document.createElement("canvas");
-  c.width = Math.round(w * s); c.height = Math.round(h * s);
-  c.getContext("2d").drawImage(src, x0, y0, w, h, 0, 0, c.width, c.height);
-  const res = landmarker.detect(c);
+  const cw = Math.round(w * s), ch = Math.round(h * s);
   const mx = 0.02 * w, my = 0.02 * h;
-  for (const lm of res.faceLandmarks) {
-    const f = faceFromLandmarks(lm, x0, y0, w, h);
-    const [a, b, c2, d] = f.bbox;
-    f.truncated = (x0 > 0 && a < x0 + mx) || (y0 > 0 && b < y0 + my) || (x1 < W && c2 > x1 - mx) || (y1 < H && d > y1 - my);
-    out.push(f);
+  for (const rot of rots) {
+    const swap = rot === 90 || rot === 270;
+    const c = document.createElement("canvas");
+    c.width = swap ? ch : cw; c.height = swap ? cw : ch;
+    const ctx = c.getContext("2d");
+    if (rot === 90) { ctx.translate(ch, 0); ctx.rotate(Math.PI / 2); }
+    else if (rot === 180) { ctx.translate(cw, ch); ctx.rotate(Math.PI); }
+    else if (rot === 270) { ctx.translate(0, cw); ctx.rotate(-Math.PI / 2); }
+    ctx.drawImage(src, x0, y0, w, h, 0, 0, cw, ch);
+    const rw = swap ? h : w, rh = swap ? w : h;   // 回転後の画像の、元スケールでの大きさ
+    const res = landmarker.detect(c);
+    for (const lm of res.faceLandmarks) {
+      const P = lm.map(p => { const q = toOriginal(rot, p.x * rw, p.y * rh, w, h); return [q[0] + x0, q[1] + y0]; });
+      const f = faceFromPoints(P);
+      const [a, b, c2, d] = f.bbox;
+      f.truncated = (x0 > 0 && a < x0 + mx) || (y0 > 0 && b < y0 + my) || (x1 < W && c2 > x1 - mx) || (y1 < H && d > y1 - my);
+      out.push(f);
+    }
   }
 }
 
@@ -130,7 +147,7 @@ async function detectFaces(src, W, H, onProg) {
   const levels = [1, 2, 3, 4].filter(n => n === 1 || Math.min(W, H) / n >= 200);
   const total = levels.reduce((s, n) => s + n * n, 0); let done = 0;
   for (const n of levels) for (const box of tileGrid(W, H, n)) {
-    detectRegion(src, box, W, H, found);
+    detectRegion(src, box, W, H, found, n <= 2 ? [0, 90, 180, 270] : [0]);
     onProg(++done / total);
     await new Promise(r => setTimeout(r));   // UIを固めない
   }
