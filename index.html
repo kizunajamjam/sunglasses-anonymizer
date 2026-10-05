@@ -217,6 +217,11 @@ function poseHeads(src, W, H) {
     const L = Math.hypot(eye[0]-ear[0], eye[1]-ear[1]);
     const eyeD = Math.hypot(P[2][0]-P[5][0], P[2][1]-P[5][1]);
     if (L < 4) continue;
+    // 姿勢推定の目の点は鼻寄り(下)にずれるため、口(鼻)と反対側=頭頂方向へ補正
+    const ux = (eye[0]-ear[0]) / L, uy = (eye[1]-ear[1]) / L;
+    let nx = -uy, ny = ux;
+    if (nx * (P[0][0]-eye[0]) + ny * (P[0][1]-eye[1]) > 0) { nx = -nx; ny = -ny; }
+    eye[0] += nx * L * 0.25; eye[1] += ny * L * 0.25;
     heads.push({ eye, ear, L, ratio: L / Math.max(eyeD, 1e-6) });
   }
   return heads;
