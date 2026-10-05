@@ -23,7 +23,7 @@
 </style>
 </head>
 <body>
-<h1>サングラス匿名化 <small id="ver" style="font-weight:400;color:var(--mut);font-size:.75rem">v1.3</small></h1>
+<h1>サングラス匿名化 <small id="ver" style="font-weight:400;color:var(--mut);font-size:.75rem">v1.4</small></h1>
 <p class="sub">写真は端末内だけで処理され、外部へ送信されません。元写真は変更されず、加工済みを別ファイルとして保存します。</p>
 
 <div class="row">
@@ -372,28 +372,47 @@ function summarize() {
   $("summary").innerHTML = `合計 ${results.length}枚 / 検出 ${n}人 / <span class="${rv||zero?'warn':''}">要確認 ${rv}人${zero ? ` / 顔0件 ${zero}枚` : ""}</span>`;
 }
 
-function save(r) {
+// 保存用の画像は先に作っておく（iPhoneはタップ直後でないと共有シートを開けないため）
+function prepareFile(r) {
   // 保存用は元の解像度で合成する（元画像の画素はサングラス以外そのまま）
   const style = $("style").value, scale = parseFloat($("scale").value);
-  const out = document.createElement("canvas"); out.width = r.W; out.height = r.H;
-  const ctx = out.getContext("2d"); ctx.drawImage(r.img, 0, 0);
-  for (const f of r.faces) drawFace(ctx, f, style, scale);
-  out.toBlob(async blob => {
-    const base = r.name.replace(/\.[^.]+$/, "");
-    const fname = `${base}_sunglasses.${r.png ? "png" : "jpg"}`;
-    const file = new File([blob], fname, { type: blob.type });
-    if (navigator.canShare && navigator.canShare({ files: [file] })) {
-      try { await navigator.share({ files: [file] }); return; } catch (e) { if (e.name === "AbortError") return; }
+  r.filePromise = new Promise(resolve => {
+    const out = document.createElement("canvas"); out.width = r.W; out.height = r.H;
+    const ctx = out.getContext("2d"); ctx.drawImage(r.img, 0, 0);
+    for (const f of r.faces) drawFace(ctx, f, style, scale);
+    out.toBlob(blob => {
+      const base = r.name.replace(/\.[^.]+$/, "");
+      r.file = new File([blob], `${base}_sunglasses.${r.png ? "png" : "jpg"}`, { type: blob.type });
+      resolve(r.file);
+    }, r.png ? "image/png" : "image/jpeg", 1.0);
+  });
+  r.file = null;
+}
+
+// 共有シート（「画像を保存」で写真アプリへ）。使えない環境ではダウンロード
+async function saveFiles(list) {
+  if (navigator.canShare && navigator.canShare({ files: list })) {
+    try { await navigator.share({ files: list }); return; }
+    catch (e) {
+      if (e.name === "AbortError") return;
+      if (e.name === "NotAllowedError") { $("status").textContent = "準備できました。もう一度保存を押してください。"; return; }
     }
-    const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = fname; a.click();
+  }
+  for (const file of list) {
+    const a = document.createElement("a"); a.href = URL.createObjectURL(file); a.download = file.name; a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-  }, r.png ? "image/png" : "image/jpeg", 1.0);
+    await new Promise(r => setTimeout(r, 600));
+  }
+}
+async function save(rs) {
+  const list = rs.every(r => r.file) ? rs.map(r => r.file) : await Promise.all(rs.map(r => r.filePromise));
+  await saveFiles(list);
 }
 
 $("pick").onclick = () => $("file").click();
 $("file").onchange = e => { files = [...e.target.files]; $("list").innerHTML = ""; results = []; $("summary").textContent = ""; $("saveAll").disabled = true; $("status").textContent = `${files.length}枚を選択`; updateButtons(); };
 $("scale").oninput = () => { $("scaleV").textContent = parseFloat($("scale").value).toFixed(2); };
-const rerender = () => { results.forEach(renderPreview); };
+const rerender = () => { results.forEach(r => { renderPreview(r); prepareFile(r); }); };
 $("scale").onchange = rerender; $("style").onchange = rerender;
 
 $("run").onclick = async () => {
@@ -408,16 +427,16 @@ $("run").onclick = async () => {
       $("status").textContent = `処理中 ${i + 1}/${files.length}`;
       const faces = await detectFaces(img, W, H, p => info.textContent = `検出中 ${Math.round(p * 100)}%`);
       const r = { name: file.name, png: /png$/i.test(file.type), img, faces, W, H, card };
-      results.push(r); renderPreview(r); updateInfo(r);
+      results.push(r); renderPreview(r); updateInfo(r); prepareFile(r);
       card.querySelector(".save").disabled = false;
-      card.querySelector(".save").onclick = () => save(r);
+      card.querySelector(".save").onclick = () => save([r]);
     } catch (e) { info.textContent = "失敗: " + e.message; info.className = "info warn"; }
   }
   summarize();
   $("status").textContent = "完了";
   $("run").disabled = false; $("saveAll").disabled = !results.length;
 };
-$("saveAll").onclick = async () => { for (const r of results) { save(r); await new Promise(r => setTimeout(r, 600)); } };
+$("saveAll").onclick = () => save(results);
 
 init().catch(e => { $("status").textContent = "読み込み失敗: " + e.message; });
 </script>
