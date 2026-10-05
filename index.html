@@ -23,7 +23,7 @@
 </style>
 </head>
 <body>
-<h1>サングラス匿名化 <small id="ver" style="font-weight:400;color:var(--mut);font-size:.75rem">v1.4</small></h1>
+<h1>サングラス匿名化 <small id="ver" style="font-weight:400;color:var(--mut);font-size:.75rem">v1.5</small></h1>
 <p class="sub">写真は端末内だけで処理され、外部へ送信されません。元写真は変更されず、加工済みを別ファイルとして保存します。</p>
 
 <div class="row">
@@ -157,7 +157,7 @@ function detectRegion(src, box, W, H, out, rots) {
 }
 
 // ---------- 遠距離用 BlazeFace: 小さい顔の補完（必ず要確認） ----------
-const BLAZE_MIN_SCORE = 0.6;
+const BLAZE_MIN_SCORE = 0.6, BLAZE_STRONG = 0.7;
 function faceFromEyes(rEye, lEye, bbox) {
   const d = Math.hypot(lEye[0]-rEye[0], lEye[1]-rEye[1]), bw = bbox[2] - bbox[0];
   let f;
@@ -208,9 +208,10 @@ async function mergeBlazeInner(src, W, H, faces, onProg) {
     if (done % 8 === 0) await new Promise(r => setTimeout(r));
   }
   cands.sort((p, q) => q.score - p.score);   // 一番自信のある向きの結果を採用
-  for (const { rEye, lEye, mid, box, ang } of cands) {
+  for (const { score, rEye, lEye, mid, box, ang } of cands) {
     const f = faceFromEyes(rEye, lEye, box);
     if (f.bar) f.bar.ang = ang;
+    f.score = score;
     const dup = out.some(k => {
       if (sameFace(f, k)) return true;
       const [a, b, c2, e] = k.bbox, m = 0.2 * Math.max(c2 - a, e - b);
@@ -218,7 +219,14 @@ async function mergeBlazeInner(src, W, H, faces, onProg) {
     });
     if (!dup) out.push(f);
   }
-  return out;
+  // 自信の高い簡易検出のすぐ隣にある、より小さい「要確認」の顔は同じ頭の耳などの誤認として捨てる
+  const strong = out.filter(f => f.score >= BLAZE_STRONG);
+  return out.filter(k => !(k.rot !== undefined && k.reasons.length && strong.some(f => {
+    const [a, b, c2, e] = f.bbox, m = 0.5 * (c2 - a);
+    const km = [(k.rEye[0]+k.lEye[0])/2, (k.rEye[1]+k.lEye[1])/2];
+    const size = g => Math.max(g.bbox[2] - g.bbox[0], g.bbox[3] - g.bbox[1]);
+    return km[0] >= a - m && km[0] <= c2 + m && km[1] >= b - m && km[1] <= e + m && size(k) < size(f);
+  })));
 }
 
 // ---------- 横顔: 姿勢推定で頭の位置を取り、目の位置に太いバーを置く ----------
