@@ -23,7 +23,7 @@
 </style>
 </head>
 <body>
-<h1>サングラス匿名化 <small id="ver" style="font-weight:400;color:var(--mut);font-size:.75rem">v1.2</small></h1>
+<h1>サングラス匿名化 <small id="ver" style="font-weight:400;color:var(--mut);font-size:.75rem">v1.3</small></h1>
 <p class="sub">写真は端末内だけで処理され、外部へ送信されません。元写真は変更されず、加工済みを別ファイルとして保存します。</p>
 
 <div class="row">
@@ -179,27 +179,44 @@ async function mergeBlaze(src, W, H, faces, onProg) {
   try { return await mergeBlazeInner(src, W, H, faces, onProg); }
   catch (e) { console.warn("blaze failed; skipping", e); blaze = null; return faces; }   // 補助検出が使えなくても処理は続ける
 }
+// 寝ている人・横倒しの顔は 0度では見逃すため、大きいタイルだけ 30度刻みで回して検出する
+const BLAZE_ROTS = Array.from({ length: 12 }, (_, i) => i * 30);
 async function mergeBlazeInner(src, W, H, faces, onProg) {
-  const out = faces.slice();
+  const out = faces.slice(), cands = [];
   const levels = [1, 2, 3, 4, 6, 8, 10].filter(n => n === 1 || Math.min(W, H) / n >= 240);
-  const total = levels.reduce((s, n) => s + n * n, 0); let done = 0;
-  for (const n of levels) for (const [x0, y0, x1, y1] of tileGrid(W, H, n)) {
-    const w = x1 - x0, h = y1 - y0, c = document.createElement("canvas");
-    c.width = w; c.height = h; c.getContext("2d").drawImage(src, x0, y0, w, h, 0, 0, w, h);
+  const rotsOf = n => n <= 2 ? BLAZE_ROTS : [0];
+  const total = levels.reduce((s, n) => s + n * n * rotsOf(n).length, 0); let done = 0;
+  for (const n of levels) for (const [x0, y0, x1, y1] of tileGrid(W, H, n)) for (const rot of rotsOf(n)) {
+    const w = x1 - x0, h = y1 - y0, a = rot * Math.PI / 180, cs = Math.cos(a), sn = Math.sin(a);
+    const RW = Math.round(w * Math.abs(cs) + h * Math.abs(sn)), RH = Math.round(w * Math.abs(sn) + h * Math.abs(cs));
+    const c = document.createElement("canvas"); c.width = RW; c.height = RH;
+    const ctx = c.getContext("2d");
+    if (rot % 90) { ctx.fillStyle = "#7f7f7f"; ctx.fillRect(0, 0, RW, RH); }
+    ctx.translate(RW / 2, RH / 2); ctx.rotate(-a); ctx.translate(-w / 2, -h / 2);
+    ctx.drawImage(src, x0, y0, w, h, 0, 0, w, h);
+    const back = (px, py) => { const dx = px - RW / 2, dy = py - RH / 2; return [w / 2 + dx * cs - dy * sn + x0, h / 2 + dx * sn + dy * cs + y0]; };
     for (const d of blaze.detect(c).detections) {
-      if (d.categories[0].score < BLAZE_MIN_SCORE) continue;   // 背景の物体などの誤検出が多い低スコアは捨てる
-      const bb = d.boundingBox, box = [bb.originX + x0, bb.originY + y0, bb.originX + bb.width + x0, bb.originY + bb.height + y0];
-      const kp = d.keypoints, rEye = [kp[0].x * w + x0, kp[0].y * h + y0], lEye = [kp[1].x * w + x0, kp[1].y * h + y0];
-      const f = faceFromEyes(rEye, lEye, box), mid = [(rEye[0]+lEye[0])/2, (rEye[1]+lEye[1])/2];
-      const dup = out.some(k => {
-        if (sameFace(f, k)) return true;
-        const [a, b, c2, e] = k.bbox, m = 0.2 * Math.max(c2 - a, e - b);
-        return mid[0] >= a - m && mid[0] <= c2 + m && mid[1] >= b - m && mid[1] <= e + m && iou(f.bbox, k.bbox) > 0.1;
-      });
-      if (!dup) out.push(f);
+      const score = d.categories[0].score;
+      if (score < BLAZE_MIN_SCORE) continue;   // 背景の物体などの誤検出が多い低スコアは捨てる
+      const bb = d.boundingBox, size = Math.max(bb.width, bb.height), kp = d.keypoints;
+      const rEye = back(kp[0].x * RW, kp[0].y * RH), lEye = back(kp[1].x * RW, kp[1].y * RH);
+      const mid = [(rEye[0]+lEye[0])/2, (rEye[1]+lEye[1])/2], ctr = back(bb.originX + bb.width / 2, bb.originY + bb.height / 2);
+      const box = [ctr[0] - size / 2, ctr[1] - size / 2, ctr[0] + size / 2, ctr[1] + size / 2];
+      cands.push({ score, rEye, lEye, mid, box, ang: a });
     }
     onProg(++done / total);
     if (done % 8 === 0) await new Promise(r => setTimeout(r));
+  }
+  cands.sort((p, q) => q.score - p.score);   // 一番自信のある向きの結果を採用
+  for (const { rEye, lEye, mid, box, ang } of cands) {
+    const f = faceFromEyes(rEye, lEye, box);
+    if (f.bar) f.bar.ang = ang;
+    const dup = out.some(k => {
+      if (sameFace(f, k)) return true;
+      const [a, b, c2, e] = k.bbox, m = 0.2 * Math.max(c2 - a, e - b);
+      return mid[0] >= a - m && mid[0] <= c2 + m && mid[1] >= b - m && mid[1] <= e + m && iou(f.bbox, k.bbox) > 0.1;
+    });
+    if (!dup) out.push(f);
   }
   return out;
 }
